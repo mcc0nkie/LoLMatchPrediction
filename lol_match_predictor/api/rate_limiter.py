@@ -16,11 +16,13 @@ class RateLimitedAPI:
         self.pbar = None
         self.parts_of_total = 0
         self.total = None
+        self.api_bar_format = '\033[32m{l_bar}{bar}{r_bar}\033[00m | {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}{postfix}] [{percentage:3.0f}%] [{desc}] [{postfix}]'
+        self.limit_bar_format = '\033[34m{l_bar}{bar}{r_bar}\033[00m | {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}{postfix}] [{percentage:3.0f}%] [{desc}] [{postfix}]'
         
     @lru_cache(maxsize=500)
-    def __call__(self, endpoint, params, name, total=None):
+    def __call__(self, endpoint, name, total=None, **kwargs):
         self.endpoint = endpoint
-        self.params = params
+        self.params = {**kwargs}
         self.name = name
         self.total = total
         if self.total is None:
@@ -28,7 +30,7 @@ class RateLimitedAPI:
 
         response = None
   
-        while response is None or response.status_code == 429:
+        while response is None or response.status_code in (429,503):
 
             response = self.pull_data()
             
@@ -84,13 +86,13 @@ class RateLimitedAPI:
     
     def pull_data(self):
         if self.pbar is None:
-            self.pbar = tqdm(total=self.total, desc=self.name, unit=' calls')
+            self.pbar = tqdm(total=self.total, desc=self.name, unit=' calls', initial=self.parts_of_total, bar_format=self.api_bar_format)
         else:
             self.pbar.set_description_str(self.name)
       
         self.calls.append(datetime.now())
         max_time = max(self.calls)
-        min_time = min(time >= max_time - timedelta(seconds=self.time_limit) for time in self.calls)
+        min_time = min(t for t in self.calls if t >= max_time - timedelta(seconds=self.time_limit))
         self._time_since_last_reset = (max_time - min_time).total_seconds()
         response = requests.get(self.endpoint, params=self.params)
         
@@ -104,11 +106,11 @@ class RateLimitedAPI:
                 wait_time = int(wait_time) + 1
             except KeyError or ValueError:
                 wait_time = 60
-            with tqdm(total=wait_time, desc=f'Rate limited, waiting {wait_time}s') as pbar:
+            with tqdm(total=wait_time, desc=f'Rate limited, waiting {wait_time}s', bar_format=self.limit_bar_format) as pbar:
                 for _ in range(wait_time):
                     time.sleep(1)
                     pbar.update(1)
-            self.pbar = tqdm(total=self.total, desc=self.name, unit='calls')
+            self.pbar = tqdm(total=self.total, desc=self.name, unit='calls', initial=self.parts_of_total, bar_format=self.api_bar_format)
         
         # only update if no total was provided
         if self.total is None:
@@ -117,7 +119,7 @@ class RateLimitedAPI:
         return response
     
     def test_if_429(self, response):
-        if response.status_code == 429:
+        if response.status_code in (429, 503):
             if self.pbar is not None:
                 self.pbar.close()
             try:
@@ -125,13 +127,13 @@ class RateLimitedAPI:
                 wait_time = int(wait_time) + 1
             except KeyError or ValueError:
                 wait_time = 60
-            with tqdm(total=wait_time, desc=f'Rate limited, waiting {wait_time}s') as pbar:
+            with tqdm(total=wait_time, desc=f'Rate limited, waiting {wait_time}s', bar_format=self.limit_bar_format) as pbar:
                 for _ in range(wait_time):
                     time.sleep(1)
                     pbar.update(1)
 
             # restart progress bar
-            self.pbar = tqdm(total=self.total, desc=self.name, unit='calls')
+            self.pbar = tqdm(total=self.total, desc=self.name, unit='calls', initial=self.parts_of_total, bar_format=self.api_bar_format)
 
 
     def close(self):

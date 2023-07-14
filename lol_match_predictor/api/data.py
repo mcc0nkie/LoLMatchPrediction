@@ -2,22 +2,24 @@ import numpy as np
 import pandas as pd
 from lol_match_predictor.api.constants import _API_ENDPOINTS, _RIOT_API_KEY
 from lol_match_predictor.api.rate_limiter import RateLimitedAPI
+import sqlalchemy as sa
 
 ratelimiter = RateLimitedAPI()
 
 class SummonerList:
-    def __init__(self, matchId):
+    def __init__(self, matchId, verbose=False):
         self.matchId = matchId
         self._api_endpoint = _API_ENDPOINTS["MATCH-V5"]["matchId"].format(matchId=self.matchId)
         self.summoner_list = None
         self.bad_response = None
         self.summoner_data_list = []
+        self.verbose = verbose
     
     def get_summoners_from_match(self):
         params = {
             'api_key': _RIOT_API_KEY
         }
-        response = ratelimiter(self._api_endpoint, params=params, name="Retrieving Summoners from Match", total=10)
+        response = ratelimiter(self._api_endpoint, name="Retrieving Summoners from Match", total=1, **params)
         if response.status_code != 200:
             self.bad_response = response
             raise ValueError(f"Error code {response.status_code} returned from Riot API; you may look the .bad_response attribute of this object for more information.")
@@ -26,10 +28,15 @@ class SummonerList:
     def get_summoner_data(self):
         if self.summoner_list is None:
             raise ValueError("You must call get_summoners_from_match() before calling get_summoner_data().")
-        for summoner in self.summoner_list:
-            summoner_obj = Summoner(summoner['puuid'], "encryptedPUUID")
+        for i, summoner in enumerate(self.summoner_list):
+            
+            if self.verbose:
+               print(f'Getting summoner {i}') 
+            
+            summoner_obj = Summoner(summoner, "encryptedPUUID")
             summoner_obj.get_summoner()
             summoner_obj.get_matches()
+            summoner_obj.save_to_postgres("match_data", "LoL_Stats", "taco", "byUc0ugaR!", "192.168.0.201")
             self.summoner_data_list.append(summoner_obj)
 
 
@@ -58,7 +65,7 @@ class Summoner:
 
     def get_summoner(self):
         params={'api_key': _RIOT_API_KEY}
-        response = ratelimiter(self._api_endpoint, params=params, name="Retrieving Summoner")
+        response = ratelimiter(self._api_endpoint, name="Retrieving Summoner", **params)
         if response.status_code == 200:
             response_json = response.json()
             # parse the response
@@ -87,6 +94,12 @@ class Summoner:
             raise ValueError("You must call get_matches() before calling matches_to_df().")
         return pd.DataFrame(self.match_list.matches_to_dict())
     
+    def save_to_postgres(self, table_name, database_name, user, password, host, port=5432, if_exists='append'):
+        engine = sa.create_engine(f'postgresql://{user}:{password}@{host}:{port}/{database_name}')
+        df = self.matches_to_df()
+        df.to_parquet(f"{self.name}.parquet")
+        df.to_sql(table_name, engine, if_exists=if_exists, index=False)
+    
 
 class MatchList:
     def __init__(self, puuid):
@@ -111,7 +124,7 @@ class MatchList:
 
         while True:  
             params['start'] = len(self.all_ranked_matches) 
-            response = ratelimiter(self._api_endpoint, params=params, name="Querying Match List") 
+            response = ratelimiter(self._api_endpoint, name="Querying Match List", **params) 
 
             if response.status_code != 200:
                 self.bad_response = response
@@ -119,7 +132,7 @@ class MatchList:
 
             response_json = response.json()
 
-            if not response_json:
+            if not response_json or len(response_json) == 0:
                 break
 
             self.all_ranked_matches.extend(response_json)
@@ -145,6 +158,7 @@ class MatchList:
         for match in self.all_ranked_matches_collection:
             data.append(match.__dict__())
         return data
+    
 
 class Match:
     def __init__(self, matchId, puuid_of_reference, num_of_matches_in_batch=None):
@@ -153,7 +167,8 @@ class Match:
         self.match_data = None
         self.bad_response = None
         self.puuid_of_reference = puuid_of_reference    
-        self.puuid_of_reference_role = None
+        self.puuid_of_reference_individual_position = None
+        self.puuid_of_reference_team_position = None
         self.puuid_of_reference_won = None
         self.game_length = None
         self.game_start_time = None
@@ -166,7 +181,7 @@ class Match:
         params = {
             'api_key': _RIOT_API_KEY
         }
-        response = ratelimiter(self._api_endpoint,  params=params, name="Downloading Match Data", total=self.num_of_matches_in_batch)      
+        response = ratelimiter(self._api_endpoint, name="Downloading Match Data", total=self.num_of_matches_in_batch, **params)      
 
         if response.status_code != 200:
             self.bad_response = response
@@ -176,13 +191,15 @@ class Match:
 
         for participant in response_json["info"]["participants"]:
             if participant["puuid"] == self.puuid_of_reference:
-                self.puuid_of_reference_role = participant['individualPosition']
-                self.puuid_of_reference_won = participant['win']
-                self.game_length = response_json["info"]["gameDuration"]
-                self.game_start_time = response_json["info"]["gameStartTimestamp"]
-                self.gameType = response_json["info"]["gameType"]
-                self.mapId = response_json["info"]["mapId"]
-                self.championId = participant["championId"]
+                self.puuid_of_reference_individual_position = participant.get('individualPosition', None)
+                self.puuid_of_reference_team_position = participant.get('teamPosition', None)
+                self.puuid_of_reference_won = participant.get('win', None)
+                self.game_length = response_json["info"].get('gameDuration', None)
+                self.game_start_time = response_json["info"].get('gameStartTimestamp', None)
+                self.gameType = response_json["info"].get('gameType', None)
+                self.mapId = response_json["info"].get('mapId', None)
+                self.championId = participant.get('championId', None)
+                self.teamEarlySurrendered = participant.get('teamEarlySurrendered', None)
                 break  # Stop the loop as soon as we find the participant
 
         
@@ -204,7 +221,8 @@ class Match:
             "matchId": self.matchId,
             "puuid_of_reference": self.puuid_of_reference,
             "won": self.puuid_of_reference_won,
-            "role": self.puuid_of_reference_role,
+            "individual_position": self.puuid_of_reference_individual_position,
+            "team_position": self.puuid_of_reference_team_position,
             "game_length": self.game_length,
             "game_start_time": self.game_start_time,
             "gameType": self.gameType,
