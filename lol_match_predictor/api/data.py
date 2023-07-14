@@ -1,6 +1,10 @@
 import requests
 import numpy as np
 import pandas as pd
+from lol_match_predictor.api.constants import _API_ENDPOINTS, _RIOT_API_KEY
+from lol_match_predictor.api.rate_limiter import RateLimitedAPI
+
+ratelimiter = RateLimitedAPI()
 
 class Summoner:
     def __init__(self, identifier, id_type):
@@ -26,7 +30,8 @@ class Summoner:
         self.match_list = None
 
     def get_summoner(self):
-        response = requests.get(self._api_endpoint, headers={"X-Riot-Token": _RIOT_API_KEY})
+        params={'api_key': _RIOT_API_KEY}
+        response = ratelimiter(self._api_endpoint, params=None, name="Retrieving Summoner")
         if response.status_code == 200:
             response_json = response.json()
             # parse the response
@@ -39,7 +44,7 @@ class Summoner:
             self.summonerLevel = response_json.get("summonerLevel", None)
         else:
             self.bad_response = response
-            raise ValueError(f"Error code {response.status_code} returned from Riot API; you may look the .bad_response attribute of this object for more information.")
+            raise ValueError(f"Error code {response.status_code} returned from Riot API; you may look at the .bad_response attribute of this object for more information.")
         
         return response.json()
     
@@ -70,14 +75,15 @@ class MatchList:
         params = {
             'queue': 420,
             'count': 100,
-            'start': 0
+            'start': 0,
+            'api_key': _RIOT_API_KEY
         }
 
         self.all_ranked_matches = []
 
         while True:  
-            params['start'] = len(self.all_ranked_matches)  
-            response = requests.get(self._api_endpoint, headers={"X-Riot-Token": _RIOT_API_KEY}, params=params)
+            params['start'] = len(self.all_ranked_matches) 
+            response = ratelimiter(self._api_endpoint, params=params, name="Querying Match List") 
 
             if response.status_code != 200:
                 self.bad_response = response
@@ -120,8 +126,11 @@ class Match:
         self.bad_response = None
         self.puuid_of_reference = puuid_of_reference        
     
-    def get_match(self):        
-        response = requests.get(self._api_endpoint, headers={"X-Riot-Token": _RIOT_API_KEY})
+    def get_match(self):  
+        params = {
+            'api_key': _RIOT_API_KEY
+        }
+        response = ratelimiter(self._api_endpoint,  params=params, name="Downloading Match Data")      
 
         if response.status_code != 200:
             self.bad_response = response
