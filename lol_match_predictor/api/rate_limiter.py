@@ -5,10 +5,12 @@ import requests
 from tqdm import tqdm
 import math
 
+MAX_RETRIES = 10
+
 class CustomTqdm(tqdm):
     def __init__(self, *args, **kwargs):
         kwargs.setdefault('mininterval', 2)  # Set the default mininterval in seconds (how often the progress bar updates)
-        kwargs.setdefault('leave', False) # set the default leave (whether or not the progress bar stays in the terminal after closing)
+        # kwargs.setdefault('leave', False) # set the default leave (whether or not the progress bar stays in the terminal after closing)
         super().__init__(*args, **kwargs)
 
 class RateLimitedAPI:
@@ -44,20 +46,30 @@ class RateLimitedAPI:
 
         self.response = None
   
-        while self.response is None or self.response.status_code != 200:
+        while self.response is None or self.response.status_code != 200 or self.retries != MAX_RETRIES:
 
-            self.response = self.pull_data()
-            
-            if self.response.status_code != 200:
-                self.retries += 1
+            self.retries += 1
+            try:
+                self.pull_data()
+            except (requests.exceptions.ReadTimeout, requests.exceptions.ConnectTimeout, requests.exceptions.RequestException, requests.exceptions.Timeout):
+                self.response = None
                 self.delay_for_response_code()
+            
+            if self.response is None or self.response.status_code != 200:
+                if self.retries == MAX_RETRIES:
+                    self.response = 'MAX_RETRIES_REACHED'
+                else:
+                    self.delay_for_response_code()
+                
 
         # if there is total provided, we need to save how many parts have been completed and update the pbar      
         if self.total is not None:
             self.parts_of_total += 1
         if self.pbar is not None:
             self.pbar.update(1)
-        return self.pull_data()
+        
+        self.retries = 0 # reset retries
+        return self.response
     
     def pull_data(self):
         if self.pbar is None:
@@ -66,27 +78,20 @@ class RateLimitedAPI:
             self.pbar.set_description_str(self.name)
       
         self.calls.append(datetime.now())
-        max_time = max(self.calls)
-        min_time = min(t for t in self.calls if t >= max_time - timedelta(seconds=self.time_limit))
-        self._time_since_last_reset = (max_time - min_time).total_seconds()
-        while self.response is None:
-            try:
-                self.response = requests.get(self.endpoint, params=self.params, timeout=20)
-            except (requests.exceptions.ReadTimeout, requests.exceptions.ConnectTimeout, requests.exceptions.RequestException, requests.exceptions.Timeout):
-                print("The request timed out")
-                self.retries += 1
-                self.delay_for_response_code()
+    
+        self.response = requests.get(self.endpoint, params=self.params)
 
-
-        self.delay_for_response_code()
-
-        self.calls_in_time_limit = sum(time >= max_time - timedelta(seconds=self.time_limit) for time in self.calls)
+    def check_pull_limit(self):
+        self.max_time = max(self.calls)
+        self.min_time = min(t for t in self.calls if t >= self.max_time - timedelta(seconds=self.time_limit))
+        self._time_since_last_reset = (self.max_time - self.min_time).total_seconds()
+        self.calls_in_time_limit = sum(time >= self.max_time - timedelta(seconds=self.time_limit) for time in self.calls)
         if self.calls_in_time_limit >= self.pull_limit:
             self.pbar.close()
             try:
                 wait_time = self.time_limit - self._time_since_last_reset
                 wait_time = int(wait_time) + 1
-            except KeyError or ValueError:
+            except (KeyError, ValueError):
                 wait_time = 60
             with CustomTqdm(total=wait_time, desc=f'Rate limited, waiting {wait_time}s', bar_format=self.limit_bar_format, leave=False) as pbar:
                 for _ in range(wait_time):
@@ -97,8 +102,6 @@ class RateLimitedAPI:
         # only update if no total was provided
         if self.total is None:
             self.pbar.update(1)
-
-        return self.response
     
     def delay_for_response_code(self):
         
@@ -107,13 +110,17 @@ class RateLimitedAPI:
         try:
             wait_time = self.response.headers['Retry-After']
             wait_time = int(wait_time)
-        except (KeyError,ValueError,AttributeError):
+            if wait_time < 10:
+                wait_time = 10
+            error_type = response.status_code
+        except (KeyError,ValueError,AttributeError,NameError):
             wait_time = 60
+            error_type = 'TIMEOUT'
 
         # dynamically increase wait time for the number of retries
         wait_time = math.ceil(wait_time * self.retries / 10)
 
-        with CustomTqdm(total=wait_time, desc=f'Rate limited, waiting {wait_time}s', bar_format=self.limit_bar_format, leave=False) as pbar:
+        with CustomTqdm(total=wait_time, desc=f'Rate limited ({error_type} code), waiting {wait_time}s', bar_format=self.limit_bar_format, leave=False) as pbar:
             for _ in range(wait_time):
                 time.sleep(1)
                 pbar.update(1)

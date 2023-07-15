@@ -12,5 +12,5 @@ _API_ENDPOINTS = {
     }
 }
 
-_RIOT_API_KEY = "RGAPI-ececaadd-2cde-4cda-af88-f7f3760ae59a"
+_RIOT_API_KEY = "RGAPI-8689fd3a-1ead-448b-9998-22f1154dc26a"
     

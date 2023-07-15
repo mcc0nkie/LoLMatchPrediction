@@ -6,6 +6,8 @@ import sqlalchemy as sa
 
 ratelimiter = RateLimitedAPI()
 
+MAX_MATCHES_PER_PLAYER = 1_000 # increments of 100
+
 class SummonerList:
     def __init__(self, matchId, verbose=False):
         self.matchId = matchId
@@ -38,7 +40,7 @@ class SummonerList:
                print(f'Getting summoner {i}') 
             
             summoner_obj = Summoner(summoner, "encryptedPUUID")
-            summoner_obj.get_summoner()
+            summoner_fetch_status = summoner_obj.get_summoner()
             summoner_obj.get_matches()
             summoner_obj.save_to_postgres("match_data", "LoL_Stats", "taco", "byUc0ugaR!", "192.168.0.201")
             self.summoner_data_list.append(summoner_obj)
@@ -72,23 +74,24 @@ class Summoner:
         
         response = None
 
-        while response is None or response.status_code != 200:
+        while response is None or response.status_code != 200 or response != 'MAX_RETRIES_REACHED':
             response = ratelimiter(self._api_endpoint, name="Retrieving Summoner", **params)
-            if response.status_code == 200:
-                response_json = response.json()
-                # parse the response
-                self.id = response_json.get("id", None)
-                self.accountId = response_json.get("accountId", None)
-                self.puuid = response_json.get("puuid", None)
-                self.name = response_json.get("name", None)
-                self.profileIconId = response_json.get("profileIconId", None)
-                self.revisionDate = response_json.get("revisionDate", None)
-                self.summonerLevel = response_json.get("summonerLevel", None)
-            else:
-                self.bad_response = response
-                print(f"Received {self.bad_response.status_code} for Summoner {self.name}; retrying...")
         
-        return response.json()
+        if type(response) == str:
+            return False
+            print(f"Received {self.bad_response.status_code} for Summoner {self.name}; skipping...")
+        elif response.status_code == 200:
+            response_json = response.json()
+            # parse the response
+            self.id = response_json.get("id", None)
+            self.accountId = response_json.get("accountId", None)
+            self.puuid = response_json.get("puuid", None)
+            self.name = response_json.get("name", None)
+            self.profileIconId = response_json.get("profileIconId", None)
+            self.revisionDate = response_json.get("revisionDate", None)
+            self.summonerLevel = response_json.get("summonerLevel", None)
+        
+        return True
     
     def get_matches(self):
         match_list = MatchList(self.puuid)
@@ -124,29 +127,40 @@ class MatchList:
         params = {
             'queue': 420,
             'count': 100,
-            'start': 0,
+            'start': -1,
             'api_key': _RIOT_API_KEY
         }
 
         self.all_ranked_matches = []
 
         while True:  
-            params['start'] = len(self.all_ranked_matches) 
-            
+            if params['start'] >= MAX_MATCHES_PER_PLAYER:
+                break
+            if params['start'] == len(self.all_ranked_matches):
+                params['start'] = len(self.all_ranked_matches) + int(params['count'])
+            else:
+                params['start'] = len(self.all_ranked_matches) 
+
             response = None
-            while response is None or response.status_code != 200:
+            while response is None or response.status_code != 200 or response != 'MAX_RETRIES_REACHED':
                 response = ratelimiter(self._api_endpoint, name="Querying Match List", **params) 
 
                 if response.status_code != 200:
                     self.bad_response = response
                     print(f"Received {self.bad_response.status_code} while querying match list; retrying...")
             
-            response_json = response.json()
+            
+            if type(response) == str or response.status_code != 200: # the ratelimiter should never return anything other than 200 status code or MAX_RETRIES_REACHED, but just in case
+                continue
+            elif response.status_code == 200:
+                response_json = response.json()
 
-            if not response_json or len(response_json) == 0:
-                break
+                if not response_json or len(response_json) == 0:
+                    break
 
-            self.all_ranked_matches.extend(response_json)
+                self.all_ranked_matches.extend(response_json)
+
+                    
 
         self.all_ranked_matches = np.unique(self.all_ranked_matches)
         print(f"Found {len(self.all_ranked_matches)} matches.")
@@ -157,8 +171,11 @@ class MatchList:
 
         for matchId in self.all_ranked_matches:
             match = Match(matchId, self.puuid, len(self.all_ranked_matches))
-            match.get_match()
-            self.all_ranked_matches_collection.append(match)
+            get_match_status = match.get_match()
+            if get_match_status == True: # if it failed to get the match data, it will skip this match
+                self.all_ranked_matches_collection.append(match)
+            else:
+                continue
 
         print(f"Retrieved data for {len(self.all_ranked_matches_collection)} matches.")
         return self.all_ranked_matches_collection
@@ -175,7 +192,6 @@ class Match:
     def __init__(self, matchId, puuid_of_reference, num_of_matches_in_batch=None):
         self.matchId = matchId
         self._api_endpoint = _API_ENDPOINTS["MATCH-V5"]["matchId"].format(matchId=self.matchId)
-        self.match_data = None
         self.bad_response = None
         self.puuid_of_reference = puuid_of_reference    
         self.puuid_of_reference_individual_position = None
@@ -194,14 +210,16 @@ class Match:
         }
         
         response = None
-        while response is None or response.status_code != 200:
+        while response is None or response.status_code != 200 or response != 'MAX_RETRIES_REACHED':
             response = ratelimiter(self._api_endpoint, name="Downloading Match Data", total=self.num_of_matches_in_batch, **params)      
 
             if response.status_code != 200:
                 self.bad_response = response
                 print(f"Received {self.bad_response.status_code} for match {self.matchId}; retrying...")
         
-        if response.status_code == 200:
+        if type(response) == str or response.status_code != 200:
+            return False
+        elif response.status_code == 200:
             response_json = response.json()
 
             for participant in response_json["info"]["participants"]:
@@ -217,7 +235,7 @@ class Match:
                     self.teamEarlySurrendered = participant.get('teamEarlySurrendered', None)
                     break  # Stop the loop as soon as we find the participant
         
-        return self.match_data
+        return True
     
     def __dict__(self):
         return {
