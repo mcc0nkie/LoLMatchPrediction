@@ -9,7 +9,7 @@ MAX_RETRIES = 10
 
 class CustomTqdm(tqdm):
     def __init__(self, *args, **kwargs):
-        kwargs.setdefault('mininterval', 2)  # Set the default mininterval in seconds (how often the progress bar updates)
+        kwargs.setdefault('mininterval', 1)  # Set the default mininterval in seconds (how often the progress bar updates)
         # kwargs.setdefault('leave', False) # set the default leave (whether or not the progress bar stays in the terminal after closing)
         super().__init__(*args, **kwargs)
 
@@ -45,21 +45,34 @@ class RateLimitedAPI:
             self.parts_of_total = 0
 
         self.response = None
-  
-        while self.response is None or self.response.status_code != 200 or self.retries != MAX_RETRIES:
 
-            self.retries += 1
+        self.continue_loop = True
+  
+        while True:  # We will break the loop manually when needed
             try:
                 self.pull_data()
             except (requests.exceptions.ReadTimeout, requests.exceptions.ConnectTimeout, requests.exceptions.RequestException, requests.exceptions.Timeout):
                 self.response = None
                 self.delay_for_response_code()
+
+            # If the response is None, we retry
+            if self.response is None:
+                self.retries += 1
+            # If the response is a string, we stop the loop
+            elif isinstance(self.response, str):
+                break
+            # If the response's status code is not 200, we retry
+            elif isinstance(self.response, requests.models.Response) and self.response.status_code != 200:
+                self.retries += 1
+            # If none of the above conditions are met, we stop the loop
+            else:
+                break
+
+            # If we've reached the maximum number of retries, we stop the loop
+            if self.retries == MAX_RETRIES:
+                self.response = 'MAX_RETRIES_REACHED'
+                break
             
-            if self.response is None or self.response.status_code != 200:
-                if self.retries == MAX_RETRIES:
-                    self.response = 'MAX_RETRIES_REACHED'
-                else:
-                    self.delay_for_response_code()
                 
 
         # if there is total provided, we need to save how many parts have been completed and update the pbar      
@@ -78,8 +91,8 @@ class RateLimitedAPI:
             self.pbar.set_description_str(self.name)
       
         self.calls.append(datetime.now())
-    
-        self.response = requests.get(self.endpoint, params=self.params)
+
+        self.response = requests.get(self.endpoint, params=self.params, timeout=20)
 
     def check_pull_limit(self):
         self.max_time = max(self.calls)

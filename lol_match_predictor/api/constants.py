@@ -1,4 +1,4 @@
-import pwinput
+import os
 
 _API_ENDPOINTS = {
     "SUMMONER-V4": {
@@ -12,5 +12,5 @@ _API_ENDPOINTS = {
     }
 }
 
-_RIOT_API_KEY = "RGAPI-8689fd3a-1ead-448b-9998-22f1154dc26a"
+_RIOT_API_KEY = os.getenv('_RIOT_API_KEY')
     

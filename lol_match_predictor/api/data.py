@@ -3,6 +3,8 @@ import pandas as pd
 from lol_match_predictor.api.constants import _API_ENDPOINTS, _RIOT_API_KEY
 from lol_match_predictor.api.rate_limiter import RateLimitedAPI
 import sqlalchemy as sa
+import requests
+from pwinput import pwinput
 
 ratelimiter = RateLimitedAPI()
 
@@ -32,6 +34,7 @@ class SummonerList:
         self.summoner_list = response.json()['metadata']['participants']
     
     def get_summoner_data(self):
+        my_db_pw = pwinput.pwinput("enter db pw: ", mask='*')
         if self.summoner_list is None:
             raise ValueError("You must call get_summoners_from_match() before calling get_summoner_data().")
         for i, summoner in enumerate(self.summoner_list):
@@ -42,7 +45,7 @@ class SummonerList:
             summoner_obj = Summoner(summoner, "encryptedPUUID")
             summoner_fetch_status = summoner_obj.get_summoner()
             summoner_obj.get_matches()
-            summoner_obj.save_to_postgres("match_data", "LoL_Stats", "taco", "byUc0ugaR!", "192.168.0.201")
+            summoner_obj.save_to_postgres("match_data", "LoL_Stats", "taco", my_db_pw, "192.168.0.201")
             self.summoner_data_list.append(summoner_obj)
 
 
@@ -74,24 +77,21 @@ class Summoner:
         
         response = None
 
-        while response is None or response.status_code != 200 or response != 'MAX_RETRIES_REACHED':
+        while True:
             response = ratelimiter(self._api_endpoint, name="Retrieving Summoner", **params)
-        
-        if type(response) == str:
-            return False
-            print(f"Received {self.bad_response.status_code} for Summoner {self.name}; skipping...")
-        elif response.status_code == 200:
-            response_json = response.json()
-            # parse the response
-            self.id = response_json.get("id", None)
-            self.accountId = response_json.get("accountId", None)
-            self.puuid = response_json.get("puuid", None)
-            self.name = response_json.get("name", None)
-            self.profileIconId = response_json.get("profileIconId", None)
-            self.revisionDate = response_json.get("revisionDate", None)
-            self.summonerLevel = response_json.get("summonerLevel", None)
-        
-        return True
+            if isinstance(response, str):
+                return False
+            elif isinstance(response, requests.models.Response) and response.status_code == 200:
+                response_json = response.json()
+                # parse the response
+                self.id = response_json.get("id", None)
+                self.accountId = response_json.get("accountId", None)
+                self.puuid = response_json.get("puuid", None)
+                self.name = response_json.get("name", None)
+                self.profileIconId = response_json.get("profileIconId", None)
+                self.revisionDate = response_json.get("revisionDate", None)
+                self.summonerLevel = response_json.get("summonerLevel", None)
+                return True
     
     def get_matches(self):
         match_list = MatchList(self.puuid)
@@ -133,6 +133,7 @@ class MatchList:
 
         self.all_ranked_matches = []
 
+        continue_next = False
         while True:  
             if params['start'] >= MAX_MATCHES_PER_PLAYER:
                 break
@@ -142,23 +143,24 @@ class MatchList:
                 params['start'] = len(self.all_ranked_matches) 
 
             response = None
-            while response is None or response.status_code != 200 or response != 'MAX_RETRIES_REACHED':
-                response = ratelimiter(self._api_endpoint, name="Querying Match List", **params) 
-
-                if response.status_code != 200:
-                    self.bad_response = response
-                    print(f"Received {self.bad_response.status_code} while querying match list; retrying...")
-            
-            
-            if type(response) == str or response.status_code != 200: # the ratelimiter should never return anything other than 200 status code or MAX_RETRIES_REACHED, but just in case
-                continue
-            elif response.status_code == 200:
-                response_json = response.json()
-
-                if not response_json or len(response_json) == 0:
+            while True:
+                response = ratelimiter(self._api_endpoint, name="Querying Match List", **params)
+                if isinstance(response, str):
+                    continue_next = True
                     break
+                elif isinstance(response, requests.models.Response) and response.status_code == 200:
+                    break
+            
+            if continue_next:
+                continue_next = False
+                continue
 
-                self.all_ranked_matches.extend(response_json)
+            response_json = response.json()
+
+            if not response_json or len(response_json) == 0:
+                break
+
+            self.all_ranked_matches.extend(response_json)
 
                     
 
@@ -210,32 +212,27 @@ class Match:
         }
         
         response = None
-        while response is None or response.status_code != 200 or response != 'MAX_RETRIES_REACHED':
-            response = ratelimiter(self._api_endpoint, name="Downloading Match Data", total=self.num_of_matches_in_batch, **params)      
+        while True:
+            response = ratelimiter(self._api_endpoint, name="Downloading Match Data", total=self.num_of_matches_in_batch, **params)  
+            if isinstance(response, str):
+                return False
+            elif isinstance(response, requests.models.Response) and response.status_code == 200:    
+                response_json = response.json()
 
-            if response.status_code != 200:
-                self.bad_response = response
-                print(f"Received {self.bad_response.status_code} for match {self.matchId}; retrying...")
+                for participant in response_json["info"]["participants"]:
+                    if participant["puuid"] == self.puuid_of_reference:
+                        self.puuid_of_reference_individual_position = participant.get('individualPosition', None)
+                        self.puuid_of_reference_team_position = participant.get('teamPosition', None)
+                        self.puuid_of_reference_won = participant.get('win', None)
+                        self.game_length = response_json["info"].get('gameDuration', None)
+                        self.game_start_time = response_json["info"].get('gameStartTimestamp', None)
+                        self.gameType = response_json["info"].get('gameType', None)
+                        self.mapId = response_json["info"].get('mapId', None)
+                        self.championId = participant.get('championId', None)
+                        self.teamEarlySurrendered = participant.get('teamEarlySurrendered', None)
+                        return True  # Stop the loop as soon as we find the participant
         
-        if type(response) == str or response.status_code != 200:
-            return False
-        elif response.status_code == 200:
-            response_json = response.json()
-
-            for participant in response_json["info"]["participants"]:
-                if participant["puuid"] == self.puuid_of_reference:
-                    self.puuid_of_reference_individual_position = participant.get('individualPosition', None)
-                    self.puuid_of_reference_team_position = participant.get('teamPosition', None)
-                    self.puuid_of_reference_won = participant.get('win', None)
-                    self.game_length = response_json["info"].get('gameDuration', None)
-                    self.game_start_time = response_json["info"].get('gameStartTimestamp', None)
-                    self.gameType = response_json["info"].get('gameType', None)
-                    self.mapId = response_json["info"].get('mapId', None)
-                    self.championId = participant.get('championId', None)
-                    self.teamEarlySurrendered = participant.get('teamEarlySurrendered', None)
-                    break  # Stop the loop as soon as we find the participant
         
-        return True
     
     def __dict__(self):
         return {
