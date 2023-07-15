@@ -19,10 +19,14 @@ class SummonerList:
         params = {
             'api_key': _RIOT_API_KEY
         }
-        response = ratelimiter(self._api_endpoint, name="Retrieving Summoners from Match", total=1, **params)
-        if response.status_code != 200:
-            self.bad_response = response
-            raise ValueError(f"Error code {response.status_code} returned from Riot API; you may look the .bad_response attribute of this object for more information.")
+        
+        response = None
+        
+        while response is None or response.status_code != 200:
+            response = ratelimiter(self._api_endpoint, name="Retrieving Summoners from Match", total=1, **params)
+            if response.status_code != 200:
+                self.bad_response = response
+                print(f"Received {self.bad_response.status_code} when getting summoner list from matchId {self.matchId}; retrying...")
         self.summoner_list = response.json()['metadata']['participants']
     
     def get_summoner_data(self):
@@ -65,20 +69,24 @@ class Summoner:
 
     def get_summoner(self):
         params={'api_key': _RIOT_API_KEY}
-        response = ratelimiter(self._api_endpoint, name="Retrieving Summoner", **params)
-        if response.status_code == 200:
-            response_json = response.json()
-            # parse the response
-            self.id = response_json.get("id", None)
-            self.accountId = response_json.get("accountId", None)
-            self.puuid = response_json.get("puuid", None)
-            self.name = response_json.get("name", None)
-            self.profileIconId = response_json.get("profileIconId", None)
-            self.revisionDate = response_json.get("revisionDate", None)
-            self.summonerLevel = response_json.get("summonerLevel", None)
-        else:
-            self.bad_response = response
-            raise ValueError(f"Error code {response.status_code} returned from Riot API; you may look at the .bad_response attribute of this object for more information.")
+        
+        response = None
+
+        while response is None or response.status_code != 200:
+            response = ratelimiter(self._api_endpoint, name="Retrieving Summoner", **params)
+            if response.status_code == 200:
+                response_json = response.json()
+                # parse the response
+                self.id = response_json.get("id", None)
+                self.accountId = response_json.get("accountId", None)
+                self.puuid = response_json.get("puuid", None)
+                self.name = response_json.get("name", None)
+                self.profileIconId = response_json.get("profileIconId", None)
+                self.revisionDate = response_json.get("revisionDate", None)
+                self.summonerLevel = response_json.get("summonerLevel", None)
+            else:
+                self.bad_response = response
+                print(f"Received {self.bad_response.status_code} for Summoner {self.name}; retrying...")
         
         return response.json()
     
@@ -124,12 +132,15 @@ class MatchList:
 
         while True:  
             params['start'] = len(self.all_ranked_matches) 
-            response = ratelimiter(self._api_endpoint, name="Querying Match List", **params) 
+            
+            response = None
+            while response is None or response.status_code != 200:
+                response = ratelimiter(self._api_endpoint, name="Querying Match List", **params) 
 
-            if response.status_code != 200:
-                self.bad_response = response
-                raise ValueError(f"Error code {response.status_code} returned from Riot API; you may look the .bad_response attribute of this object for more information.")
-
+                if response.status_code != 200:
+                    self.bad_response = response
+                    print(f"Received {self.bad_response.status_code} while querying match list; retrying...")
+            
             response_json = response.json()
 
             if not response_json or len(response_json) == 0:
@@ -181,38 +192,30 @@ class Match:
         params = {
             'api_key': _RIOT_API_KEY
         }
-        response = ratelimiter(self._api_endpoint, name="Downloading Match Data", total=self.num_of_matches_in_batch, **params)      
-
-        if response.status_code != 200:
-            self.bad_response = response
-            raise ValueError(f"Error code {response.status_code} returned from Riot API; you may look the .bad_response attribute of this object for more information.")
         
-        response_json = response.json()
+        response = None
+        while response is None or response.status_code != 200:
+            response = ratelimiter(self._api_endpoint, name="Downloading Match Data", total=self.num_of_matches_in_batch, **params)      
 
-        for participant in response_json["info"]["participants"]:
-            if participant["puuid"] == self.puuid_of_reference:
-                self.puuid_of_reference_individual_position = participant.get('individualPosition', None)
-                self.puuid_of_reference_team_position = participant.get('teamPosition', None)
-                self.puuid_of_reference_won = participant.get('win', None)
-                self.game_length = response_json["info"].get('gameDuration', None)
-                self.game_start_time = response_json["info"].get('gameStartTimestamp', None)
-                self.gameType = response_json["info"].get('gameType', None)
-                self.mapId = response_json["info"].get('mapId', None)
-                self.championId = participant.get('championId', None)
-                self.teamEarlySurrendered = participant.get('teamEarlySurrendered', None)
-                break  # Stop the loop as soon as we find the participant
-
+            if response.status_code != 200:
+                self.bad_response = response
+                print(f"Received {self.bad_response.status_code} for match {self.matchId}; retrying...")
         
-        # winning_team = next(team for team in response_json['teams'] if team['win'])
+        if response.status_code == 200:
+            response_json = response.json()
 
-        # player = next(participant for participant in response_json['participants'] if participant['puuid'] == self.puuid_of_reference)
-
-        # if winning_team == player['teamId']:
-        #     self.puuid_of_reference_won = True 
-        # else:
-        #     self.puuid_of_reference_won = False
-
-        # self.puuid_of_reference_role = player['individualPosition']
+            for participant in response_json["info"]["participants"]:
+                if participant["puuid"] == self.puuid_of_reference:
+                    self.puuid_of_reference_individual_position = participant.get('individualPosition', None)
+                    self.puuid_of_reference_team_position = participant.get('teamPosition', None)
+                    self.puuid_of_reference_won = participant.get('win', None)
+                    self.game_length = response_json["info"].get('gameDuration', None)
+                    self.game_start_time = response_json["info"].get('gameStartTimestamp', None)
+                    self.gameType = response_json["info"].get('gameType', None)
+                    self.mapId = response_json["info"].get('mapId', None)
+                    self.championId = participant.get('championId', None)
+                    self.teamEarlySurrendered = participant.get('teamEarlySurrendered', None)
+                    break  # Stop the loop as soon as we find the participant
         
         return self.match_data
     

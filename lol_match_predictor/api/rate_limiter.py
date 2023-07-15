@@ -3,24 +3,38 @@ import requests
 from datetime import datetime, timedelta
 import requests
 from tqdm import tqdm
-from functools import lru_cache
+import math
+
+class CustomTqdm(tqdm):
+    def __init__(self, *args, **kwargs):
+        kwargs.setdefault('mininterval', 2)  # Set the default mininterval in seconds (how often the progress bar updates)
+        kwargs.setdefault('leave', False) # set the default leave (whether or not the progress bar stays in the terminal after closing)
+        super().__init__(*args, **kwargs)
 
 class RateLimitedAPI:
     
     def __init__(self):
+        self.additional_time_limit_buffer = 10
         self.pull_limit = 100
-        self.time_limit = 120
+        self.time_limit = 120 + self.additional_time_limit_buffer
         self.calls = []
         self.calls_in_time_limit = []
         self._time_since_last_reset = 0
         self.pbar = None
         self.parts_of_total = 0
         self.total = None
-        self.api_bar_format = '\033[32m{l_bar}{bar}{r_bar}\033[00m | {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}{postfix}] [{percentage:3.0f}%] [{desc}] [{postfix}]'
-        self.limit_bar_format = '\033[34m{l_bar}{bar}{r_bar}\033[00m | {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}{postfix}] [{percentage:3.0f}%] [{desc}] [{postfix}]'
+        self.retries = 0
+        self.api_bar_format = '\033[32m{l_bar}{bar}{r_bar}\033[00m | {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}{postfix}] [{percentage:3.0f}%] [{desc}]'
+        self.limit_bar_format = '\033[34m{l_bar}{bar}{r_bar}\033[00m | {n_fmt}/{total_fmt} [{elapsed}<{remaining}]'
         
-    @lru_cache(maxsize=500)
     def __call__(self, endpoint, name, total=None, **kwargs):
+        '''
+        Used to:
+        1. Make a request to an API endpoint
+        2. Test that response to see if the response was not 200
+        3. If it's not 200, repeat the process of getting the request until it's 200, increasing wait time until a successful request comes through
+        '''
+        
         self.endpoint = endpoint
         self.params = {**kwargs}
         self.name = name
@@ -28,14 +42,15 @@ class RateLimitedAPI:
         if self.total is None:
             self.parts_of_total = 0
 
-        response = None
+        self.response = None
   
-        while response is None or response.status_code in (429,503):
+        while self.response is None or self.response.status_code != 200:
 
-            response = self.pull_data()
+            self.response = self.pull_data()
             
-            if response.status_code == 429:
-                self.test_if_429(response)
+            if self.response.status_code != 200:
+                self.retries += 1
+                self.delay_for_response_code()
 
         # if there is total provided, we need to save how many parts have been completed and update the pbar      
         if self.total is not None:
@@ -43,50 +58,10 @@ class RateLimitedAPI:
         if self.pbar is not None:
             self.pbar.update(1)
         return self.pull_data()
-        # response = requests.get(self.endpoint, params=self.params)
-        
-        # if self.pbar is None:
-        #     self.pbar = tqdm(total=None, desc=self.name, unit=' calls')
-        # else:
-        #     self.pbar.set_description_str(self.name)
-      
-        # self.calls.append(datetime.now())
-        # min_time = min(self.calls)
-        # max_time = max(self.calls)
-        # self._time_since_last_reset = (max_time - min_time).total_seconds()
-        
-        # if response.status_code == 429:
-        #     self.pbar.close()
-        #     try:
-        #         wait_time = response.headers['Retry-After']
-        #         wait_time = int(wait_time) + 1
-        #     except KeyError or ValueError:
-        #         wait_time = 60
-        #     with tqdm(total=wait_time, desc=f'Rate limited, waiting {wait_time}s') as pbar:
-        #         for _ in range(wait_time):
-        #             time.sleep(1)
-        #             pbar.update(1)
-
-        #     # restart progress bar
-        #     self.pbar = tqdm(total=None, desc=self.name, unit='calls')
-        
-        # self.calls_in_time_limit = sum(time >= max_time - timedelta(seconds=self.time_limit) for time in self.calls)
-        # if self.calls_in_time_limit >= self.pull_limit:
-        #     self.pbar.close()
-        #     wait_time = self.time_limit - self._time_since_last_reset
-        #     with tqdm(total=wait_time, desc=f'Rate limited, waiting {wait_time}s') as pbar:
-        #         for _ in range(wait_time):
-        #             time.sleep(1)
-        #             pbar.update(1)
-        #     self.pbar = tqdm(total=None, desc=self.name, unit='calls')
-        
-        # self.pbar.update(1)
-        
-        # return response
     
     def pull_data(self):
         if self.pbar is None:
-            self.pbar = tqdm(total=self.total, desc=self.name, unit=' calls', initial=self.parts_of_total, bar_format=self.api_bar_format)
+            self.pbar = CustomTqdm(total=self.total, desc=self.name, unit=' calls', initial=self.parts_of_total, bar_format=self.api_bar_format)
         else:
             self.pbar.set_description_str(self.name)
       
@@ -94,9 +69,16 @@ class RateLimitedAPI:
         max_time = max(self.calls)
         min_time = min(t for t in self.calls if t >= max_time - timedelta(seconds=self.time_limit))
         self._time_since_last_reset = (max_time - min_time).total_seconds()
-        response = requests.get(self.endpoint, params=self.params)
-        
-        self.test_if_429(response)
+        while self.response is None:
+            try:
+                self.response = requests.get(self.endpoint, params=self.params, timeout=20)
+            except (requests.exceptions.ReadTimeout, requests.exceptions.ConnectTimeout, requests.exceptions.RequestException, requests.exceptions.Timeout):
+                print("The request timed out")
+                self.retries += 1
+                self.delay_for_response_code()
+
+
+        self.delay_for_response_code()
 
         self.calls_in_time_limit = sum(time >= max_time - timedelta(seconds=self.time_limit) for time in self.calls)
         if self.calls_in_time_limit >= self.pull_limit:
@@ -106,34 +88,38 @@ class RateLimitedAPI:
                 wait_time = int(wait_time) + 1
             except KeyError or ValueError:
                 wait_time = 60
-            with tqdm(total=wait_time, desc=f'Rate limited, waiting {wait_time}s', bar_format=self.limit_bar_format) as pbar:
+            with CustomTqdm(total=wait_time, desc=f'Rate limited, waiting {wait_time}s', bar_format=self.limit_bar_format, leave=False) as pbar:
                 for _ in range(wait_time):
                     time.sleep(1)
                     pbar.update(1)
-            self.pbar = tqdm(total=self.total, desc=self.name, unit='calls', initial=self.parts_of_total, bar_format=self.api_bar_format)
+            self.pbar = CustomTqdm(total=self.total, desc=self.name, unit='calls', initial=self.parts_of_total, bar_format=self.api_bar_format)
         
         # only update if no total was provided
         if self.total is None:
             self.pbar.update(1)
-        
-        return response
-    
-    def test_if_429(self, response):
-        if response.status_code in (429, 503):
-            if self.pbar is not None:
-                self.pbar.close()
-            try:
-                wait_time = response.headers['Retry-After']
-                wait_time = int(wait_time) + 1
-            except KeyError or ValueError:
-                wait_time = 60
-            with tqdm(total=wait_time, desc=f'Rate limited, waiting {wait_time}s', bar_format=self.limit_bar_format) as pbar:
-                for _ in range(wait_time):
-                    time.sleep(1)
-                    pbar.update(1)
 
-            # restart progress bar
-            self.pbar = tqdm(total=self.total, desc=self.name, unit='calls', initial=self.parts_of_total, bar_format=self.api_bar_format)
+        return self.response
+    
+    def delay_for_response_code(self):
+        
+        if self.pbar is not None:
+            self.pbar.close()
+        try:
+            wait_time = self.response.headers['Retry-After']
+            wait_time = int(wait_time)
+        except (KeyError,ValueError,AttributeError):
+            wait_time = 60
+
+        # dynamically increase wait time for the number of retries
+        wait_time = math.ceil(wait_time * self.retries / 10)
+
+        with CustomTqdm(total=wait_time, desc=f'Rate limited, waiting {wait_time}s', bar_format=self.limit_bar_format, leave=False) as pbar:
+            for _ in range(wait_time):
+                time.sleep(1)
+                pbar.update(1)
+
+        # restart progress bar
+        self.pbar = CustomTqdm(total=self.total, desc=self.name, unit='calls', initial=self.parts_of_total, bar_format=self.api_bar_format)
 
 
     def close(self):
